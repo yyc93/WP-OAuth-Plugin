@@ -1,8 +1,5 @@
 <?php
 
-// load the wordpress core so this page can access wp functions during an ajax/cross-domain call:
-require_once("../../../wp-load.php");
-
 // start the user session for maintaining individual user states during the multi-stage authentication flow:
 session_start();
 
@@ -12,7 +9,7 @@ define('HTTP_UTIL', get_option('wpoa_http_util'));
 define('CLIENT_ENABLED', get_option('wpoa_facebook_api_enabled'));
 define('CLIENT_ID', get_option('wpoa_facebook_api_id'));
 define('CLIENT_SECRET', get_option('wpoa_facebook_api_secret'));
-define('REDIRECT_URI', "http://" . $_SERVER['SERVER_NAME'] . $_SERVER['SCRIPT_NAME']);
+define('REDIRECT_URI', rtrim(site_url(), '/') . '/');
 define('SCOPE', 'email'); // PROVIDER SPECIFIC: 'email' is the minimum scope required to get the user's id from Facebook
 define('URL_AUTH', "https://www.facebook.com/dialog/oauth?");
 define('URL_TOKEN', "https://graph.facebook.com/oauth/access_token?");
@@ -25,45 +22,49 @@ if (!$_SESSION['WPOA']['LAST_URL']) {$_SESSION['WPOA']['LAST_URL'] = strtok($_SE
 # AUTHENTICATION FLOW #
 // the oauth 2.0 authentication flow will start in this script and make several calls to the third-party authentication provider which in turn will make callbacks to this script that we continue to handle until the login completes with a success or failure:
 if (!CLIENT_ENABLED) {
-	$wpoa->wpoa_end_login("This third-party authentication provider has not been enabled. Please notify the admin or try again later.");
+	$this->wpoa_end_login("This third-party authentication provider has not been enabled. Please notify the admin or try again later.");
 }
 elseif (!CLIENT_ID || !CLIENT_SECRET) {
 	// do not proceed if id or secret is null:
-	$wpoa->wpoa_end_login("This third-party authentication provider has not been configured with an API key/secret. Please notify the admin or try again later.");
+	$this->wpoa_end_login("This third-party authentication provider has not been configured with an API key/secret. Please notify the admin or try again later.");
 }
-elseif (isset($_GET['error'])) {
+elseif (isset($_GET['error_description'])) {
 	// do not proceed if an error was detected:
-	$wpoa->wpoa_end_login($_GET['error'] . ": " . $_GET['error_description']);
+	$this->wpoa_end_login($_GET['error_description']);
+}
+elseif (isset($_GET['error_message'])) {
+	// do not proceed if an error was detected:
+	$this->wpoa_end_login($_GET['error_message']);
 }
 elseif (isset($_GET['code'])) {
 	// post-auth phase, verify the state:
 	if ($_SESSION['WPOA']['STATE'] == $_GET['state']) {
 		// get an access token from the third party provider:
-		get_oauth_token();
+		get_oauth_token($this);
 		// get the user's third-party identity and attempt to login/register a matching wordpress user account:
-		$oauth_identity = get_oauth_identity();
-		$wpoa->wpoa_login_user($oauth_identity);
+		$oauth_identity = get_oauth_identity($this);
+		$this->wpoa_login_user($oauth_identity);
 	}
 	else {
 		// possible CSRF attack, end the login with a generic message to the user and a detailed message to the admin/logs in case of abuse:
 		// TODO: report detailed message to admin/logs here...
-		$wpoa->wpoa_end_login("Sorry, we couldn't log you in. Please notify the admin or try again later.");
+		$this->wpoa_end_login("Sorry, we couldn't log you in. Please notify the admin or try again later.");
 	}
 }
 else {
 	// pre-auth, start the auth process:
 	if ((empty($_SESSION['WPOA']['EXPIRES_AT'])) || (time() > $_SESSION['WPOA']['EXPIRES_AT'])) {
 		// expired token; clear the state:
-		$wpoa->wpoa_clear_login_state;
+		$this->wpoa_clear_login_state();
 	}
-	get_oauth_code();
+	get_oauth_code($this);
 }
 // we shouldn't be here, but just in case...
-$wpoa->wpoa_end_login("Sorry, we couldn't log you in. The authentication flow terminated in an unexpected way. Please notify the admin or try again later.");
+$this->wpoa_end_login("Sorry, we couldn't log you in. The authentication flow terminated in an unexpected way. Please notify the admin or try again later.");
 # END OF AUTHENTICATION FLOW #
 
 # AUTHENTICATION FLOW HELPER FUNCTIONS #
-function get_oauth_code() {
+function get_oauth_code($wpoa) {
 	$params = array(
 		'response_type' => 'code',
 		'client_id' => CLIENT_ID,
@@ -77,7 +78,7 @@ function get_oauth_code() {
 	exit;
 }
 
-function get_oauth_token() {
+function get_oauth_token($wpoa) {
 	$params = array(
 		'grant_type' => 'authorization_code',
 		'client_id' => CLIENT_ID,
@@ -96,7 +97,8 @@ function get_oauth_token() {
 			curl_setopt($curl, CURLOPT_POSTFIELDS, $params);
 			// PROVIDER NORMALIZATION: Reddit requires sending a User-Agent header...
 			// PROVIDER NORMALIZATION: Reddit requires sending the client id/secret via http basic authentication
-			curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, 0); // TODO: not sure if we actually need this...
+			curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, (get_option('wpoa_http_util_verify_ssl') == 1 ? 1 : 0));
+			curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, (get_option('wpoa_http_util_verify_ssl') == 1 ? 2 : 0));
 			$result = curl_exec($curl);
 			break;
 		case 'stream-context':
@@ -133,7 +135,7 @@ function get_oauth_token() {
 	}
 }
 
-function get_oauth_identity() {
+function get_oauth_identity($wpoa) {
 	// here we exchange the access token for the user info...
 	// set the access token param:
 	$params = array(
@@ -175,8 +177,10 @@ function get_oauth_identity() {
 	$oauth_identity['provider'] = $_SESSION['WPOA']['PROVIDER'];
 	$oauth_identity['id'] = $result_obj['id']; // PROVIDER SPECIFIC: this is how Facebook returns the user's unique id
 	//$oauth_identity['email'] = $result_obj['email']; //PROVIDER SPECIFIC: this is how Facebook returns the email address
+	if (!$oauth_identity['id']) {
+		$wpoa->wpoa_end_login("Sorry, we couldn't log you in. User identity was not found. Please notify the admin or try again later.");
+	}
 	return $oauth_identity;
 }
 # END OF AUTHENTICATION FLOW HELPER FUNCTIONS #
-
 ?>
